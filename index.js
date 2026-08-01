@@ -631,19 +631,48 @@ bot.command('export', adminOnly, async (ctx) => {
   await ctx.replyWithDocument(new InputFile(Buffer.from(csv, 'utf8'), 'bookings.csv'));
 });
 
-// — рассылка
-bot.command('broadcast', adminOnly, async (ctx) => {
-  const text = ctx.match?.trim();
-  if (!text) return ctx.reply('Использование: /broadcast текст сообщения');
+// — рассылка (текстом или картинкой с подписью)
+async function runBroadcast(ctx, { text, photo }) {
+  const users = Object.values(db.users);
+  if (!users.length) return ctx.reply('Пока некому рассылать — бота никто не запускал.');
+
+  await ctx.reply(`Начинаю рассылку по ${users.length} получателям…`);
+
   let ok = 0, fail = 0;
-  for (const u of Object.values(db.users)) {
+  for (const u of users) {
     try {
-      await bot.api.sendMessage(u.id, text);
+      if (photo) await bot.api.sendPhoto(u.id, photo, { caption: text || undefined });
+      else await bot.api.sendMessage(u.id, text);
       ok++;
-    } catch { fail++; }
+    } catch {
+      fail++;
+    }
     await new Promise((r) => setTimeout(r, 60)); // не упираемся в лимиты Telegram
   }
   await ctx.reply(`Рассылка завершена. Доставлено: ${ok}, не доставлено: ${fail}`);
+}
+
+bot.command('broadcast', adminOnly, async (ctx) => {
+  const text = ctx.match?.trim();
+  if (!text) {
+    return ctx.reply(
+      'Как отправить рассылку:\n\n' +
+        '• текстом — /broadcast ваш текст\n' +
+        '• картинкой — прикрепите фото и в подписи к нему напишите /broadcast и текст'
+    );
+  }
+  await runBroadcast(ctx, { text });
+});
+
+// фото с подписью, начинающейся на /broadcast
+bot.on('message:photo', async (ctx) => {
+  const caption = (ctx.message.caption || '').trim();
+  if (!caption.startsWith('/broadcast')) return; // обычное фото от клиента — молча игнорируем
+  if (!isAdmin(ctx.from.id)) return ctx.reply('Команда доступна только администратору.');
+
+  const text = caption.replace(/^\/broadcast\s*/, '').trim();
+  const photo = ctx.message.photo.at(-1).file_id; // последний размер — максимальное качество
+  await runBroadcast(ctx, { text, photo });
 });
 
 // ───────────────────────────────────────────────
