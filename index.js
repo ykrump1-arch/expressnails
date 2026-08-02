@@ -1,10 +1,10 @@
 import http from 'node:http';
 import { Bot, InlineKeyboard, Keyboard, InputFile, GrammyError, HttpError } from 'grammy';
 
-import { db, save, saveNow } from './db.js';
+import { db, save, saveNow, setDbErrorHandler } from './db.js';
 import {
   BOT_TOKEN, ADMIN_IDS, MASTERS, WORK_SLOTS, SERVICE, SALON_NAME,
-  REMIND_BEFORE_MS, FOLLOWUP_AFTER_MS,
+  REMIND_BEFORE_MS, FOLLOWUP_AFTER_MS, TZ_HOURS,
 } from './config.js';
 import {
   esc, dateStr, dateRange, fmtDate, fmtDateShort, slotTs, masterName, isAdmin,
@@ -87,6 +87,40 @@ async function notifyAdmins(text) {
 }
 
 // ───────────────────────────────────────────────
+//  ТРЕВОГИ ДЛЯ АДМИНОВ
+// ───────────────────────────────────────────────
+
+// Чтобы одна повторяющаяся ошибка не завалила телефон сотней сообщений
+const alertSeen = new Map();
+const ALERT_COOLDOWN = 10 * 60 * 1000; // одну и ту же ошибку — не чаще раза в 10 минут
+
+async function alertAdmins(title, detail = '') {
+  const key = title + detail.slice(0, 120);
+  const now = Date.now();
+  const last = alertSeen.get(key) || 0;
+  if (now - last < ALERT_COOLDOWN) return;
+  alertSeen.set(key, now);
+
+  const time = new Date(now + TZ_HOURS * 3600 * 1000).toISOString().slice(11, 16);
+  const text =
+    `🚨 <b>${esc(title)}</b>\n` +
+    `Время: ${time} (Ташкент)\n` +
+    (detail ? `\n<code>${esc(detail.slice(0, 600))}</code>` : '');
+
+  for (const id of ADMIN_IDS) {
+    try {
+      await bot.api.sendMessage(id, text, { parse_mode: 'HTML' });
+    } catch (e) {
+      console.error('[alert]', id, e.message);
+    }
+  }
+}
+
+setDbErrorHandler((msg) => {
+  alertAdmins('Не удалось сохранить базу', msg).catch(() => {});
+});
+
+// ───────────────────────────────────────────────
 //  КЛИЕНТСКИЙ СЦЕНАРИЙ
 // ───────────────────────────────────────────────
 
@@ -137,6 +171,7 @@ bot.command('help', async (ctx) => {
       '/clients — список записывавшихся\n' +
       '/stats — аналитика\n' +
       '/reset — обнулить базу\n' +
+      '/demo — заполнить расписание для показа\n' +
       '/export — выгрузка CSV\n' +
       '/broadcast — рассылка\n' +
       '/id — узнать свой Telegram ID';
@@ -637,6 +672,20 @@ function statsText() {
   );
 }
 
+// — демо-расписание для показа клиенту: всем мастерам открыты все рабочие часы
+bot.command('demo', adminOnly, async (ctx) => {
+  for (const m of MASTERS) {
+    db.slots[m.id] ??= {};
+    for (const ds of dateRange()) db.slots[m.id][ds] = [...WORK_SLOTS];
+  }
+  saveNow();
+  await ctx.reply(
+    `✅ Расписание заполнено для показа.\n` +
+      `${MASTERS.length} мастеров × ${dateRange().length} дней × ${WORK_SLOTS.length} окон.\n\n` +
+      `Записи не тронуты. Когда салон даст настоящий график — закроешь лишнее через /slots.`
+  );
+});
+
 bot.command('stats', adminOnly, (ctx) => ctx.reply(statsText(), { parse_mode: 'HTML' }));
 
 // — обнуление базы (только админ, только с явным подтверждением словом)
@@ -866,11 +915,48 @@ setInterval(() => tick().catch((e) => console.error('[tick]', e)), 60 * 1000);
 //  ЗАПУСК
 // ───────────────────────────────────────────────
 
-bot.catch((err) => {
+bot.catch(async (err) => {
   const e = err.error;
-  if (e instanceof GrammyError) console.error('Ошибка Telegram:', e.description);
-  else if (e instanceof HttpError) console.error('Сеть недоступна:', e);
-  else console.error('Ошибка:', e);
+  let title = 'Ошибка в боте';
+  let detail = '';
+
+  if (e instanceof GrammyError) {
+    title = 'Telegram отклонил запрос';
+    detail = e.description;
+  } else if (e instanceof HttpError) {
+    title = 'Нет связи с Telegram';
+    detail = String(e.message || e);
+  } else {
+    detail = (e && e.stack) ? e.stack : String(e);
+  }
+
+  const ctx = err.ctx;
+  const who = ctx?.from
+    ? `\nКто: ${ctx.from.first_name || ''} ${ctx.from.username ? '@' + ctx.from.username : ''} (${ctx.from.id})`
+    : '';
+  const what = ctx?.message?.text ? `\nЧто нажал: ${ctx.message.text}` : '';
+
+  console.error('[bot.catch]', title, detail);
+  await alertAdmins(title, detail + who + what).catch(() => {});
+
+  // Клиент не должен видеть техническую ошибку
+  try {
+    if (ctx?.callbackQuery) await ctx.answerCallbackQuery({ text: 'Что-то пошло не так, попробуйте ещё раз' });
+    else if (ctx?.chat) await ctx.reply('Что-то пошло не так 😔 Попробуйте ещё раз или напишите нам.');
+  } catch {}
+});
+
+// Падения на уровне процесса — успеваем предупредить и сохранить базу
+process.on('uncaughtException', async (e) => {
+  console.error('[uncaught]', e);
+  await alertAdmins('Бот аварийно упал', e.stack || String(e)).catch(() => {});
+  saveNow();
+  setTimeout(() => process.exit(1), 1500);
+});
+
+process.on('unhandledRejection', async (e) => {
+  console.error('[unhandled]', e);
+  await alertAdmins('Необработанная ошибка', (e && e.stack) || String(e)).catch(() => {});
 });
 
 if (!db.meta.seeded) {
@@ -896,5 +982,15 @@ try {
 http.createServer((_, res) => { res.writeHead(200); res.end('ok'); })
   .listen(process.env.PORT || 3000);
 
-bot.start({ onStart: (i) => console.log(`Бот @${i.username} запущен`) });
+bot.start({
+  onStart: async (i) => {
+    console.log(`Бот @${i.username} запущен`);
+    const active = db.bookings.filter((b) => b.status === 'active').length;
+    await notifyAdmins(
+      `✅ <b>Бот запущен</b>\n` +
+        `@${esc(i.username)}\n` +
+        `В базе: записей ${db.bookings.length} (активных ${active}), клиентов ${Object.keys(db.users).length}`
+    ).catch(() => {});
+  },
+});
 tick().catch(() => {});
