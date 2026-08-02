@@ -136,6 +136,7 @@ bot.command('help', async (ctx) => {
       '/bookings — ближайшие записи\n' +
       '/clients — список записывавшихся\n' +
       '/stats — аналитика\n' +
+      '/reset — обнулить базу\n' +
       '/export — выгрузка CSV\n' +
       '/broadcast — рассылка\n' +
       '/id — узнать свой Telegram ID';
@@ -637,6 +638,47 @@ function statsText() {
 }
 
 bot.command('stats', adminOnly, (ctx) => ctx.reply(statsText(), { parse_mode: 'HTML' }));
+
+// — обнуление базы (только админ, только с явным подтверждением словом)
+bot.command('reset', adminOnly, async (ctx) => {
+  const arg = (ctx.match || '').trim().toUpperCase();
+
+  if (arg === 'ПОДТВЕРЖДАЮ') {
+    const n = db.bookings.length;
+    const u = Object.keys(db.users).length;
+    db.bookings = [];
+    db.users = {};
+    saveNow();
+    return ctx.reply(
+      `🧹 Аналитика обнулена.\nУдалено записей: ${n}, клиентов: ${u}.\nРасписание осталось на месте.`
+    );
+  }
+
+  if (arg === 'ВСЁ' || arg === 'ВСЕ') {
+    const n = db.bookings.length;
+    db.bookings = [];
+    db.users = {};
+    db.slots = {};
+    db.meta.seeded = true; // чтобы случайные окна не насыпались заново
+    ensureHorizon();
+    saveNow();
+    return ctx.reply(
+      `🧹 Стёрто всё.\nУдалено записей: ${n}.\nРасписание пустое — открой окна через /slots.`
+    );
+  }
+
+  await ctx.reply(
+    '⚠️ <b>Обнуление базы</b>\n\n' +
+      'Действие необратимо. Выбери, что стереть, и отправь команду целиком:\n\n' +
+      '<code>/reset ПОДТВЕРЖДАЮ</code>\n' +
+      '— удалит все записи и клиентов. Аналитика обнулится, расписание останется.\n\n' +
+      '<code>/reset ВСЁ</code>\n' +
+      '— удалит записи, клиентов и расписание. Все окна закроются, тестовые случайные тоже.\n\n' +
+      `Сейчас в базе: записей ${db.bookings.length}, клиентов ${Object.keys(db.users).length}.\n\n` +
+      '💡 Перед обнулением полезно сделать /export — выгрузишь историю в файл.',
+    { parse_mode: 'HTML' }
+  );
+});
 bot.callbackQuery('a:st', adminOnly, async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.editMessageText(statsText(), {
