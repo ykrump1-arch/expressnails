@@ -29,6 +29,10 @@ export const db = load();
 
 let timer = null;
 
+let onDbError = null;
+/** Кому сообщать о проблемах с записью на диск */
+export function setDbErrorHandler(fn) { onDbError = fn; }
+
 function writeSync() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -36,6 +40,7 @@ function writeSync() {
     fs.renameSync(FILE + '.tmp', FILE);
   } catch (e) {
     console.error('[db] ошибка записи:', e.message);
+    if (onDbError) { try { onDbError(e.message); } catch {} }
   }
 }
 
