@@ -4,7 +4,7 @@ import { Bot, InlineKeyboard, Keyboard, InputFile, GrammyError, HttpError } from
 import { db, save, saveNow, setDbErrorHandler } from './db.js';
 import {
   BOT_TOKEN, ADMIN_IDS, MASTERS, WORK_SLOTS, SERVICE, SALON_NAME,
-  REMIND_BEFORE_MS, FOLLOWUP_AFTER_MS, TZ_HOURS,
+  REMIND_BEFORE_MS, FOLLOWUP_AFTER_MS, TZ_HOURS, ALERT_IDS,
 } from './config.js';
 import {
   esc, dateStr, dateRange, fmtDate, fmtDateShort, slotTs, masterName, isAdmin,
@@ -107,7 +107,7 @@ async function alertAdmins(title, detail = '') {
     `Время: ${time} (Ташкент)\n` +
     (detail ? `\n<code>${esc(detail.slice(0, 600))}</code>` : '');
 
-  for (const id of ADMIN_IDS) {
+  for (const id of ALERT_IDS) {
     try {
       await bot.api.sendMessage(id, text, { parse_mode: 'HTML' });
     } catch (e) {
