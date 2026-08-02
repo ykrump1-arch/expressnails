@@ -27,18 +27,42 @@ const BTN_ADMIN = '⚙️ Админка';
 //  ПОЛЬЗОВАТЕЛИ / АНАЛИТИКА
 // ───────────────────────────────────────────────
 
+// Красивые названия для меток источников.
+// Метки, которых тут нет, покажутся как есть — можно дописывать свои.
+const SOURCE_LABELS = {
+  instagram: '📷 Instagram (шапка профиля)',
+  stories: '📱 Сторис',
+  vizitka: '🪪 Визитка / QR',
+  telegram: '✈️ Telegram-канал',
+  salon: '🏠 В салоне',
+  reklama: '💰 Реклама',
+  '(без метки)': '🔗 Прямой переход',
+};
+
+// Достаём метку источника из ссылки вида t.me/bot?start=instagram
+function startPayload(ctx) {
+  const t = ctx.message?.text;
+  if (!t || !t.startsWith('/start')) return null;
+  const raw = t.split(' ')[1];
+  if (!raw) return null;
+  return raw.toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32) || null;
+}
+
 function touchUser(ctx) {
   const u = ctx.from;
   if (!u) return null;
   const id = String(u.id);
+  const payload = startPayload(ctx);
   db.users[id] ??= {
     id: u.id,
     firstSeen: Date.now(),
     bookings: 0,
     phone: null,
-    source: ctx.message?.text?.split(' ')[1] || null, // deep-link ?start=instagram
+    source: payload,
   };
   const rec = db.users[id];
+  // если человек уже был в базе без метки, а теперь пришёл по ссылке — запишем
+  if (!rec.source && payload) rec.source = payload;
   rec.name = [u.first_name, u.last_name].filter(Boolean).join(' ');
   rec.username = u.username || null;
   rec.lastSeen = Date.now();
@@ -581,6 +605,22 @@ function statsText() {
     (s, m) => s + dateRange().reduce((x, ds) => x + freeSlots(m.id, ds).length, 0), 0
   );
 
+  // — откуда пришли клиенты
+  const bookedSet = new Set(all.filter((b) => b.status !== 'cancelled').map((b) => b.userId));
+  const srcMap = {};
+  for (const u of users) {
+    const key = u.source || '(без метки)';
+    srcMap[key] ??= { started: 0, booked: 0 };
+    srcMap[key].started++;
+    if (bookedSet.has(u.id)) srcMap[key].booked++;
+  }
+  const bySource = Object.entries(srcMap)
+    .sort((a, b) => b[1].started - a[1].started)
+    .map(([key, v]) => {
+      const pct = v.started ? Math.round((v.booked / v.started) * 100) : 0;
+      return `${SOURCE_LABELS[key] || key}: ${v.started} → записались ${v.booked} (${pct}%)`;
+    });
+
   return (
     '📊 <b>Аналитика</b>\n\n' +
     `<b>Записи</b>\nВсего: ${all.length}\n` +
@@ -591,6 +631,7 @@ function statsText() {
     `Вернулись повторно: ${repeat.length}\n\n` +
     `<b>По мастерам</b>\n${byMaster.map((m) => `${m.name}: ${m.n}`).join('\n')}\n\n` +
     `<b>Популярное время</b>\n${topTimes.length ? topTimes.map(([t, n]) => `${t} — ${n}`).join('\n') : '—'}\n\n` +
+    `<b>Откуда пришли</b>\n${bySource.length ? bySource.join('\n') : '—'}\n\n` +
     `<b>Загрузка</b>\nСвободных окон на ${dateRange().length} дней: ${openSlots}`
   );
 }
