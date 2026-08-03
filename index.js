@@ -764,24 +764,58 @@ bot.command('export', adminOnly, async (ctx) => {
 });
 
 // — рассылка (текстом или картинкой с подписью)
+// Переводим ответ Telegram на человеческий язык
+function deliveryReason(e) {
+  const d = String(e?.description || e?.message || e || '').toLowerCase();
+  if (d.includes('blocked by the user')) return 'заблокировал бота';
+  if (d.includes('user is deactivated')) return 'аккаунт удалён';
+  if (d.includes('chat not found')) return 'чат не найден';
+  if (d.includes("can't initiate conversation")) return 'не начинал диалог с ботом';
+  if (d.includes('too many requests')) return 'лимит Telegram, попробуйте позже';
+  if (d.includes('wrong file identifier') || d.includes('file_id')) return 'фото недоступно';
+  return d.slice(0, 60) || 'неизвестная причина';
+}
+
 async function runBroadcast(ctx, { text, photo }) {
   const users = Object.values(db.users);
   if (!users.length) return ctx.reply('Пока некому рассылать — бота никто не запускал.');
 
   await ctx.reply(`Начинаю рассылку по ${users.length} получателям…`);
 
-  let ok = 0, fail = 0;
+  let ok = 0;
+  const failures = [];
   for (const u of users) {
     try {
       if (photo) await bot.api.sendPhoto(u.id, photo, { caption: text || undefined });
       else await bot.api.sendMessage(u.id, text);
       ok++;
-    } catch {
-      fail++;
+      if (u.blocked) delete u.blocked; // вернулся — снимаем пометку
+    } catch (e) {
+      const reason = deliveryReason(e);
+      failures.push({ u, reason });
+      if (reason === 'заблокировал бота' || reason === 'аккаунт удалён') {
+        u.blocked = reason;
+        u.blockedAt = Date.now();
+      }
     }
     await new Promise((r) => setTimeout(r, 60)); // не упираемся в лимиты Telegram
   }
-  await ctx.reply(`Рассылка завершена. Доставлено: ${ok}, не доставлено: ${fail}`);
+  saveNow();
+
+  let report = `📤 <b>Рассылка завершена</b>\nДоставлено: ${ok}, не доставлено: ${failures.length}`;
+
+  if (failures.length) {
+    const lines = failures.slice(0, 25).map(({ u, reason }) => {
+      const who = esc(u.name || 'Без имени') + (u.username ? ' (@' + esc(u.username) + ')' : '');
+      return `• ${who} — ${esc(reason)}`;
+    });
+    report += `\n\n<b>Не дошло:</b>\n${lines.join('\n')}`;
+    if (failures.length > 25) report += `\n…и ещё ${failures.length - 25}`;
+    report +=
+      '\n\n<i>Заблокировавшие помечены в базе. Если человек вернётся и напишет боту, пометка снимется сама.</i>';
+  }
+
+  await ctx.reply(report, { parse_mode: 'HTML' });
 }
 
 bot.command('broadcast', adminOnly, async (ctx) => {
